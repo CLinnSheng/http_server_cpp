@@ -1,3 +1,5 @@
 #!/bin/bash
 
-./build/bin/server
+make clean
+make
+./build/bin/main

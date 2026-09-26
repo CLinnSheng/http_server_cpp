@@ -1,78 +1,75 @@
 #include <arpa/inet.h>
-#include <asm-generic/socket.h>
 #include <cstdio>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
+#include <server.h>
+#include <sstream>
 #include <sys/socket.h>
-#include <unistd.h>
-#define MAX_CONNECTION 10000
+#include <thread>
 
-int handle_client(int client_socket)
+// Initiliaze TCP Socket
+HTTP_Server::HTTP_Server()
 {
-    char input_buffer[1024];
-    size_t bytes_read = 0;
+    // IPv4, TCP
+    this->tcp_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-    bytes_read = read(client_socket, input_buffer, sizeof(input_buffer) - 1);
-
-    if (bytes_read == -1)
+    if (this->tcp_socket == INVALID_SOCKET)
     {
-        perror("Fail to read the bytes sent: read()");
-        return -1;
+        perror("Fail to initiliaze TCP Socket: socket()");
+        return;
     }
 
-    if (bytes_read == 0)
-    {
-        printf("Connection closed gracefully\n");
-        return 0;
-    }
+    int enabled = 1;
 
-    printf("Message Received: %s", input_buffer);
+    // Allow reuse of the same socket when restart
+    setsockopt(this->tcp_socket, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
 
-    return 1;
+    printf("TCP Socket Created Succesfully\n");
 }
 
-int main(int argc, char *argv[])
+// Close the socket
+HTTP_Server::~HTTP_Server()
 {
-    // First Create a TCP Socket
-    // IPv4, TCP
-    // Return the file descriptor
-    int tcp_socket = socket(AF_INET, SOCK_STREAM, 0);
-    int enabled = true;
-
-    if (tcp_socket == -1)
+    if (this->tcp_socket != -1)
     {
-        perror("Fail creating TCP socket");
-        return -1;
+        close_socket(this->tcp_socket);
     }
-    printf("TCP Socket Created Succesfully\n");
+}
 
-    setsockopt(tcp_socket, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
+void HTTP_Server::close_socket(int socket)
+{
+    if (socket == this->tcp_socket)
+    {
+        this->tcp_socket = -1;
+    }
 
-    // Listen to all local IPv4 interfaces
-    sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(8080), .sin_addr = INADDR_ANY};
+    close(socket);
+}
 
-    // Bind the TPC socket
-    int bind_res = bind(tcp_socket, (const struct sockaddr *)&addr, sizeof(addr));
+// Starting the server
+void HTTP_Server::start(int port)
+{
+    // Accept Connections from any network interfaces
+    sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(port), .sin_addr = INADDR_ANY};
 
-    if (bind_res == -1)
+    // Bind the socket
+    if (bind(this->tcp_socket, (const struct sockaddr *)&addr, sizeof(addr)) == INVALID_SOCKET)
     {
         perror("Fail to bind TCP Socket: bind()\n");
-        close(tcp_socket);
-        return -1;
+        close_socket(this->tcp_socket);
+        return;
     }
-    printf("TCP Socket bind Succesfully\n");
+    printf("TCP Socket bind succesfully\n");
 
-    // Listen on the TCP socket
-    int list_res = listen(tcp_socket, MAX_CONNECTION);
-
-    if (list_res == -1)
+    // Listen to the socket
+    if (listen(this->tcp_socket, BACKLOG) == INVALID_SOCKET)
     {
         perror("Fail to listen to TCP Socket: listen()\n");
-        close(tcp_socket);
-        return -1;
+        close_socket(this->tcp_socket);
+        return;
     }
-    printf("Successfully listen to the TCP Socket\n");
+    printf("Server is listening on port %d\n", port);
 
+    // Accepting Client Connections
     printf("Waiting for Connection\n");
     while (true)
     {
@@ -83,11 +80,76 @@ int main(int argc, char *argv[])
 
         // Extract IP & Port
         char client_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &client_addr, client_ip, sizeof(client_addr));
+        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
         printf("Get a connection from %s\n", client_ip);
 
-        handle_client(client_socket);
+        // Accept and Handle Client Request
+        // Spawn one detached thread per connection
+        // The caller thread dont have to handle it
+        std::thread([this, client_socket]() {
+            handle_client(client_socket);
+            close_socket(client_socket);
+        }).detach();
     }
 
-    return 0;
+    // Cleaning up and close the TCP socket
+    close_socket(this->tcp_socket);
 }
+
+void HTTP_Server::handle_client(Socket client_socket)
+{
+
+    char input_buffer[1024];
+
+    while (true)
+    {
+        // Leave room for the null terminator
+        ssize_t bytes_received = recv(client_socket, input_buffer, sizeof(input_buffer) - 1, 0);
+
+        if (bytes_received == -1)
+        {
+            perror("Fail to read the bytes sent: recv()");
+            return;
+        }
+
+        if (bytes_received == 0)
+        {
+            break;
+        }
+
+        // recv() does not null-terminate; do it before treating as a C string
+        input_buffer[bytes_received] = '\0';
+        printf("Message Received:\n%s\n", input_buffer);
+
+        send_response(client_socket);
+
+        // Served one HTTP/1.1 request; stop so the connection can close
+        // instead of blocking on the next recv().
+        break;
+    }
+
+    printf("Connection closed gracefully\n");
+}
+
+void HTTP_Server::send_response(Socket client_socket)
+{
+    std::stringstream response;
+
+    // Response Status Line & Each header is seperate by a CRLN or '\r\n'
+    response << "HTTP/1.1 200 OK\r\n";
+    response << "Content-Type: text/html\r\n";
+    response << "Content-Length: 46\r\n"; // Length of the HTML content
+    response << "\r\n";
+    response << "<html><body><h1>Hello, World!</h1></body></html>";
+
+    // Send the HTTP response to the client
+    int bytes_sent = send(client_socket, response.str().c_str(), response.str().length(), 0);
+    if (bytes_sent == INVALID_SOCKET)
+    {
+        perror("Fail to send response: send()\n");
+    }
+    else
+    {
+        printf("Sent %d to client\n", bytes_sent);
+    }
+};
