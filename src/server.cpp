@@ -1,8 +1,12 @@
+#include "request.h"
+#include "util/parsers.h"
 #include <arpa/inet.h>
 #include <cstdio>
+#include <iostream>
 #include <netinet/in.h>
 #include <server.h>
 #include <sstream>
+#include <string>
 #include <sys/socket.h>
 #include <thread>
 
@@ -98,34 +102,12 @@ void HTTP_Server::start(int port)
 
 void HTTP_Server::handle_client(Socket client_socket)
 {
-
-    char input_buffer[1024];
-
     while (true)
     {
-        // Leave room for the null terminator
-        ssize_t bytes_received = recv(client_socket, input_buffer, sizeof(input_buffer) - 1, 0);
-
-        if (bytes_received == -1)
-        {
-            perror("Fail to read the bytes sent: recv()");
-            return;
-        }
-
-        if (bytes_received == 0)
-        {
-            break;
-        }
-
-        // recv() does not null-terminate; do it before treating as a C string
-        input_buffer[bytes_received] = '\0';
-        printf("Message Received:\n%s\n", input_buffer);
+        std::string raw_req = read_request(client_socket);
+        Request req = util::parse_request(raw_req);
 
         send_response(client_socket);
-
-        // Served one HTTP/1.1 request; stop so the connection can close
-        // instead of blocking on the next recv().
-        break;
     }
 
     printf("Connection closed gracefully\n");
@@ -153,3 +135,33 @@ void HTTP_Server::send_response(Socket client_socket)
         printf("Sent %d to client\n", bytes_sent);
     }
 };
+
+std::string HTTP_Server::read_request(Socket client_socket)
+{
+    char input_buffer[1024];
+
+    std::string request;
+
+    // Leave room for the null terminator
+    size_t bytes_received = recv(client_socket, input_buffer, sizeof(input_buffer) - 1, 0);
+
+    // -1 -> Connection closed on error
+    // 0 -> Connection closed by client
+    if (bytes_received <= 0)
+    {
+        perror("Fail to read the bytes sent: recv()");
+    }
+
+    input_buffer[bytes_received] = '\0';
+    request += input_buffer;
+
+    // Check whether is it the end of header
+    // if (request.find("\r\n\r\n") != std::string::npos)
+    // {
+    //     break;
+    // }
+
+    printf("Message Received: \n%s\n", input_buffer);
+
+    return request;
+}

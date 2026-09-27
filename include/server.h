@@ -1,5 +1,7 @@
 #pragma once
 
+#include "request.h"
+#include <string>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
@@ -15,6 +17,8 @@ class HTTP_Server
 
     void handle_client(Socket client_socket);
     void send_response(Socket client_socket);
+
+    std::string read_request(Socket client_socket);
 
   public:
     HTTP_Server();
