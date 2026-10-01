@@ -1,12 +1,14 @@
 #include "request.h"
 #include "util/parsers.h"
 #include <arpa/inet.h>
+#include <cstddef>
 #include <cstdio>
 #include <iostream>
 #include <netinet/in.h>
 #include <server.h>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <sys/socket.h>
 #include <thread>
 
@@ -102,27 +104,37 @@ void HTTP_Server::start(int port)
 
 void HTTP_Server::handle_client(Socket client_socket)
 {
-    while (true)
-    {
-        std::string raw_req = read_request(client_socket);
-        Request req = util::parse_request(raw_req);
+    std::string buffer;
+    Request req;
 
-        send_response(client_socket);
+    while (read_request(client_socket, buffer, req))
+    {
+        printf("%s %s %s\n", req.method.c_str(), req.path.c_str(), req.http_version.c_str());
+
+        bool keep_alive = util::to_lower(req.headers["connection"]) == "keep-alive";
+        send_response(client_socket, keep_alive);
+
+        if (!keep_alive)
+        {
+            break;
+        }
     }
 
     printf("Connection closed gracefully\n");
 }
 
-void HTTP_Server::send_response(Socket client_socket)
+void HTTP_Server::send_response(Socket client_socket, bool keep_alive)
 {
-    std::stringstream response;
+    std::ostringstream response;
+    const std::string body = "<html><body><h1>Hello, World!</h1></body></html>";
 
     // Response Status Line & Each header is seperate by a CRLN or '\r\n'
     response << "HTTP/1.1 200 OK\r\n";
     response << "Content-Type: text/html\r\n";
-    response << "Content-Length: 46\r\n"; // Length of the HTML content
+    response << "Content-Length: " << body.size() << "\r\n "; // Length of the HTML content
+    response << "Connection: " << (keep_alive ? "keep-alive" : "close") << "\r\n ";
     response << "\r\n";
-    response << "<html><body><h1>Hello, World!</h1></body></html>";
+    response << body;
 
     // Send the HTTP response to the client
     int bytes_sent = send(client_socket, response.str().c_str(), response.str().length(), 0);
@@ -136,32 +148,86 @@ void HTTP_Server::send_response(Socket client_socket)
     }
 };
 
-std::string HTTP_Server::read_request(Socket client_socket)
+bool HTTP_Server::read_request(Socket client_socket, std::string &buffer, Request &req)
 {
-    char input_buffer[1024];
+    constexpr size_t MAX_HEADER = 8 * 1024;
+    constexpr size_t MAX_BODY = 10 * 1024 * 1024;
 
-    std::string request;
+    // Receive more bytes into the buffer. Returns false on close or error.
+    auto recv_more = [&]() -> bool {
+        char temp_buffer[4096];
+        while (true)
+        {
+            ssize_t bytes_received = recv(client_socket, temp_buffer, sizeof(temp_buffer), 0);
+            if (bytes_received > 0)
+            {
+                buffer.append(temp_buffer, bytes_received);
+                return true;
+            }
+            if (bytes_received == 0)
+            {
+                return false; // client closed the connection normally
+            }
+            if (errno == EINTR)
+            {
+                continue; // interrupted by a signal, retry
+            }
+            perror("recv");
+            return false;
+        }
+    };
 
-    // Leave room for the null terminator
-    size_t bytes_received = recv(client_socket, input_buffer, sizeof(input_buffer) - 1, 0);
-
-    // -1 -> Connection closed on error
-    // 0 -> Connection closed by client
-    if (bytes_received <= 0)
+    // Read until the end of the headers
+    size_t header_end;
+    while ((header_end = buffer.find("\r\n\r\n")) == std::string::npos)
     {
-        perror("Fail to read the bytes sent: recv()");
+        if (buffer.size() > MAX_HEADER)
+        {
+            return false;
+        }
+        if (!recv_more())
+        {
+            return false;
+        }
     }
 
-    input_buffer[bytes_received] = '\0';
-    request += input_buffer;
+    // Parse the headers, clearing the previous request first
+    req = Request{};
+    if (!util::parse_header(std::string_view(buffer).substr(0, header_end), req))
+    {
+        return false;
+    }
 
-    // Check whether is it the end of header
-    // if (request.find("\r\n\r\n") != std::string::npos)
-    // {
-    //     break;
-    // }
+    const size_t body_start = header_end + 4;
 
-    printf("Message Received: \n%s\n", input_buffer);
+    // Work out the body length
+    size_t content_length = 0;
+    if (auto it = req.headers.find("content-length"); it != req.headers.end())
+    {
+        try
+        {
+            content_length = std::stoul(it->second);
+        }
+        catch (...)
+        {
+            return false; // invalid number, don't let it crash the server
+        }
 
-    return request;
+        if (content_length > MAX_BODY)
+            return false;
+    }
+
+    // Read until the whole body has arrived
+    while (buffer.size() < body_start + content_length)
+    {
+        if (!recv_more())
+            return false;
+    }
+
+    req.body = buffer.substr(body_start, content_length);
+
+    // Consume this request; leftover bytes belong to the next one
+    buffer.erase(0, body_start + content_length);
+
+    return true;
 }

@@ -16,9 +16,9 @@ class HTTP_Server
     Socket tcp_socket;
 
     void handle_client(Socket client_socket);
-    void send_response(Socket client_socket);
+    void send_response(Socket client_socket, bool keep_alive);
 
-    std::string read_request(Socket client_socket);
+    bool read_request(Socket client_socket, std::string &buffer, Request &req);
 
   public:
     HTTP_Server();
